@@ -374,6 +374,60 @@ cron.invoke(
 )
 ```
 
+#### AppSync
+
+```swift
+let table = AWS.DynamoDB(
+    "MyTable",
+    primaryIndex: .init(
+        partitionKey: ("id", .string)
+    )
+)
+
+let appSync = AWS.AppSync(
+    "my-graphql-api",
+    schema: """
+    type Query {
+        getTodo(id: ID!): Todo
+    }
+    
+    type Todo {
+        id: ID!
+        name: String!
+    }
+    """,
+    authenticationType: .apiKey
+)
+
+// Add a DynamoDB data source with service role
+let serviceRole = AWS.Role("appsync-service-role", service: "appsync.amazonaws.com")
+let dataSource = appSync.addDataSource(
+    "TodoDataSource",
+    type: .dynamoDB(.init(tableName: table.name)),
+    serviceRole: serviceRole
+)
+
+// Add a resolver
+appSync.addResolver(
+    "GetTodoResolver",
+    typeName: "Query",
+    fieldName: "getTodo",
+    dataSource: dataSource,
+    requestTemplate: """
+    {
+        "version": "2018-05-29",
+        "operation": "GetItem",
+        "key": {
+            "id": $util.dynamodb.toDynamoDBJson($ctx.args.id)
+        }
+    }
+    """
+)
+
+// Create an API key for access
+appSync.addApiKey(description: "Default API Key")
+```
+
 #### Domain Name
 
 The `DomainName` construct manages a TLS certificate and the necessary
@@ -446,3 +500,6 @@ Here is a list of all the linked resources:
 | AWS SQL Database    | `SQLDB_<NAME>_USERNAME`      |
 | AWS SQL Database    | `SQLDB_<NAME>_PASSWORD`      |
 | AWS SQL Database    | `SQLDB_<NAME>_URL`           |
+| AWS AppSync         | `APPSYNC_<NAME>_NAME`        |
+| AWS AppSync         | `APPSYNC_<NAME>_GRAPHQL_URL` |
+| AWS AppSync         | `APPSYNC_<NAME>_REALTIME_URL`|
