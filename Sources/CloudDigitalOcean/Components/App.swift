@@ -182,3 +182,27 @@ extension DigitalOcean.App {
         }
     }
 }
+
+extension DigitalOcean.App {
+    /// Link a database or other linkable resource to this app
+    @discardableResult
+    public func link(_ linkable: any Linkable) -> Self {
+        environment.merge(linkable.environmentVariables)
+        return self
+    }
+
+    /// Link multiple linkable resources to this app
+    @discardableResult
+    public func link(_ linkables: [any Linkable]) -> Self {
+        for linkable in linkables {
+            link(linkable)
+        }
+        return self
+    }
+
+    /// Link multiple linkable resources to this app (variadic)
+    @discardableResult
+    public func link(_ linkables: any Linkable...) -> Self {
+        return link(linkables)
+    }
+}
