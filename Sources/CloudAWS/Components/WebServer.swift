@@ -13,6 +13,14 @@ extension AWS {
         public let service: Resource
         public let concurrency: Int
         public let environment: Environment
+        public let computeType: ComputeType
+
+        public var instanceRole: Role?
+        public var instanceProfile: InstanceProfile?
+        public var launchTemplate: LaunchTemplate?
+        public var autoScalingGroup: AutoScalingGroup?
+        public var capacityProvider: CapacityProvider?
+        public var taskDefinition: Resource?
 
         public var name: Output<String> {
             serviceName
@@ -66,6 +74,7 @@ extension AWS {
             cpu: Int = 256,
             memory: Int = 512,
             architecture: Architecture = .current,
+            computeType: ComputeType = .fargate,
             autoScaling: AutoScalingConfiguration? = nil,
             instancePort: Int = 8080,
             vpc: AWS.VPC? = nil,
@@ -75,14 +84,32 @@ extension AWS {
             context: Context = .current
         ) {
             self.concurrency = concurrency
+            self.computeType = computeType
+
+            if case .ec2(let config) = computeType {
+                if config.enableSSH && config.sshKeyName == nil {
+                    fatalError("SSH enabled but no key pair specified. Provide sshKeyName or disable SSH.")
+                }
+
+                if let minSize = config.minSize, minSize < 1 {
+                    fatalError("minSize must be at least 1")
+                }
+
+                if let minSize = config.minSize, let maxSize = config.maxSize, maxSize < minSize {
+                    fatalError("maxSize must be greater than or equal to minSize")
+                }
+            }
 
             let dockerFilePath = Docker.Dockerfile.filePath(name)
 
             self.environment = Environment(environment, shape: .nameValueList)
             self.environment["PORT"] = "\(instancePort)"
 
+            let resolvedVpc = vpc ?? AWS.VPC.default(options: options)
+
             cluster = AWS.Cluster(
                 "\(name)-cluster",
+                capacityProviderStrategy: .none,
                 options: options
             )
 
@@ -98,6 +125,79 @@ extension AWS {
                 service: "ecs-tasks.amazonaws.com",
                 options: options
             )
+
+            switch computeType {
+            case .fargate:
+                instanceRole = nil
+                instanceProfile = nil
+                launchTemplate = nil
+                autoScalingGroup = nil
+                capacityProvider = nil
+                taskDefinition = nil
+
+            case .ec2(let config):
+                instanceRole = AWS.Role(
+                    "\(name)-instance-role",
+                    service: "ec2.amazonaws.com",
+                    options: options
+                )
+
+                _ = Resource(
+                    name: "\(name)-instance-policy",
+                    type: "aws:iam:RolePolicyAttachment",
+                    properties: [
+                        "role": instanceRole!.name,
+                        "policyArn": "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role"
+                    ],
+                    options: options,
+                    context: context
+                )
+
+                instanceProfile = AWS.InstanceProfile(
+                    "\(name)-profile",
+                    role: instanceRole!,
+                    options: options
+                )
+
+                launchTemplate = nil // Temporarily nil, will be set below
+                autoScalingGroup = nil // Temporarily nil, will be set below
+                capacityProvider = nil // Temporarily nil, will be set below
+
+                taskDefinition = Resource(
+                    name: "\(name)-taskdef",
+                    type: "aws:ecs:TaskDefinition",
+                    properties: [
+                        "family": "\(name)-task",
+                        "networkMode": "awsvpc",
+                        "requiresCompatibilities": ["EC2"],
+                        "cpu": "\(cpu)",
+                        "memory": "\(memory)",
+                        "runtimePlatform": [
+                            "cpuArchitecture": architecture.ecsArchitecture
+                        ],
+                        "containerDefinitions": Resource.JSON([
+                            [
+                                "name": "\(name)-container",
+                                "image": dockerImage.uri,
+                                "cpu": cpu,
+                                "memory": memory,
+                                "essential": true,
+                                "portMappings": [
+                                    [
+                                        "containerPort": instancePort,
+                                        "hostPort": instancePort,
+                                        "protocol": "tcp"
+                                    ]
+                                ],
+                                "environment": self.environment
+                            ]
+                        ]),
+                        "taskRoleArn": role.arn
+                    ],
+                    options: options,
+                    context: context
+                )
+            }
 
             loadBalancerSecurityGroup = AWS.SecurityGroup(
                 "\(name)-lbsg",
@@ -140,52 +240,168 @@ extension AWS {
                 maxNameLength: 24
             )
 
-            let vpc = vpc ?? AWS.VPC.default(options: options)
+            if case .ec2(let config) = computeType {
+                let imageId = config.ami.resolveImageId(architecture: architecture, context: context)
+                let userData = Self.generateECSUserData(clusterName: "\(name)-cluster")
 
-            service = Resource(
-                name: "\(name)-service",
-                type: "awsx:ecs:FargateService",
-                properties: [
-                    "cluster": cluster.arn,
-                    "desiredCount": concurrency,
-                    "continueBeforeSteadyState": true,
-                    "forceNewDeployment": true,
-                    "networkConfiguration": [
-                        "assignPublicIp": true,
-                        "securityGroups": [instanceSecurityGroup.id],
-                        "subnets": vpc.publicSubnetIds,
-                    ],
-                    "triggers": [
-                        "date": Date().formatted(.iso8601)
-                    ],
-                    "taskDefinitionArgs": [
-                        "runtimePlatform": [
-                            "cpuArchitecture": architecture.ecsArchitecture
+                launchTemplate = AWS.LaunchTemplate(
+                    "\(name)-lt",
+                    imageId: imageId,
+                    instanceType: config.instanceType,
+                    instanceProfile: instanceProfile!,
+                    securityGroups: [instanceSecurityGroup.id],
+                    userData: userData,
+                    keyName: config.sshKeyName.map { "\($0)" },
+                    enableIMDSv2: true,
+                    options: options,
+                    context: context
+                )
+
+                let minSize = config.minSize ?? concurrency
+                let maxSize = config.maxSize ?? (autoScaling?.maximumConcurrency ?? concurrency * 2)
+
+                autoScalingGroup = AWS.AutoScalingGroup(
+                    "\(name)-asg",
+                    launchTemplate: launchTemplate!,
+                    minSize: minSize,
+                    maxSize: maxSize,
+                    desiredCapacity: concurrency,
+                    vpcZoneIdentifiers: resolvedVpc.publicSubnetIds,
+                    targetGroupArns: [applicationLoadBalancer.output.keyPath("defaultTargetGroup", "arn")],
+                    options: options,
+                    context: context
+                )
+
+                capacityProvider = AWS.CapacityProvider(
+                    "\(name)-cp",
+                    autoScalingGroup: autoScalingGroup!,
+                    options: options,
+                    context: context
+                )
+
+                _ = Resource(
+                    name: "\(name)-ccp",
+                    type: "aws:ecs:ClusterCapacityProviders",
+                    properties: [
+                        "clusterName": cluster.name,
+                        "capacityProviders": [capacityProvider!.name],
+                        "defaultCapacityProviderStrategies": [
+                            [
+                                "capacityProvider": capacityProvider!.name,
+                                "weight": 1,
+                                "base": 1,
+                            ]
                         ],
-                        "container": [
-                            "name": "\(name)-container",
-                            "image": dockerImage.uri,
-                            "cpu": cpu,
-                            "memory": memory,
-                            "essential": true,
-                            "portMappings": [
-                                [
-                                    "containerPort": instancePort,
-                                    "hostPort": instancePort,
-                                    "targetGroup": applicationLoadBalancer.output.keyPath("defaultTargetGroup"),
-                                ]
+                    ],
+                    options: options,
+                    context: context
+                )
+            } else {
+                _ = Resource(
+                    name: "\(name)-ccp",
+                    type: "aws:ecs:ClusterCapacityProviders",
+                    properties: [
+                        "clusterName": cluster.name,
+                        "capacityProviders": ["FARGATE", "FARGATE_SPOT"],
+                        "defaultCapacityProviderStrategies": [
+                            [
+                                "capacityProvider": "FARGATE",
+                                "weight": 1,
+                                "base": 1,
                             ],
-                            "environment": self.environment,
+                            [
+                                "capacityProvider": "FARGATE_SPOT",
+                                "weight": 1,
+                            ],
                         ],
-                        "taskRole": [
-                            "roleArn": role.arn
-                        ],
-                        "trackLatest": true,
                     ],
-                ],
-                options: options,
-                context: context
-            )
+                    options: options,
+                    context: context
+                )
+            }
+
+            service = switch computeType {
+            case .fargate:
+                Resource(
+                    name: "\(name)-service",
+                    type: "awsx:ecs:FargateService",
+                    properties: [
+                        "cluster": cluster.arn,
+                        "desiredCount": concurrency,
+                        "continueBeforeSteadyState": true,
+                        "forceNewDeployment": true,
+                        "networkConfiguration": [
+                            "assignPublicIp": true,
+                            "securityGroups": [instanceSecurityGroup.id],
+                            "subnets": resolvedVpc.publicSubnetIds,
+                        ],
+                        "triggers": [
+                            "date": Date().formatted(.iso8601)
+                        ],
+                        "taskDefinitionArgs": [
+                            "runtimePlatform": [
+                                "cpuArchitecture": architecture.ecsArchitecture
+                            ],
+                            "container": [
+                                "name": "\(name)-container",
+                                "image": dockerImage.uri,
+                                "cpu": cpu,
+                                "memory": memory,
+                                "essential": true,
+                                "portMappings": [
+                                    [
+                                        "containerPort": instancePort,
+                                        "hostPort": instancePort,
+                                        "targetGroup": applicationLoadBalancer.output.keyPath("defaultTargetGroup"),
+                                    ]
+                                ],
+                                "environment": self.environment,
+                            ],
+                            "taskRole": [
+                                "roleArn": role.arn
+                            ],
+                            "trackLatest": true,
+                        ],
+                    ],
+                    options: options,
+                    context: context
+                )
+            case .ec2:
+                Resource(
+                    name: "\(name)-service",
+                    type: "aws:ecs:Service",
+                    properties: [
+                        "cluster": cluster.arn,
+                        "desiredCount": concurrency,
+                        "taskDefinition": taskDefinition!.arn,
+                        "capacityProviderStrategies": [
+                            [
+                                "capacityProvider": capacityProvider!.name,
+                                "weight": 1,
+                                "base": 1
+                            ]
+                        ],
+                        "networkConfiguration": [
+                            "assignPublicIp": true,
+                            "securityGroups": [instanceSecurityGroup.id],
+                            "subnets": resolvedVpc.publicSubnetIds,
+                        ],
+                        "loadBalancers": [
+                            [
+                                "targetGroupArn": applicationLoadBalancer.output.keyPath("defaultTargetGroup", "arn"),
+                                "containerName": "\(name)-container",
+                                "containerPort": instancePort
+                            ]
+                        ],
+                        "forceNewDeployment": true,
+                        "triggers": [
+                            "date": Date().formatted(.iso8601)
+                        ],
+                    ],
+                    options: options,
+                    context: context
+                )
+            }
 
             if let autoScaling {
                 enableAutoScaling(
@@ -249,5 +465,71 @@ extension AWS.WebServer {
             maximumConcurrency: maximumConcurrency,
             metrics: metrics
         )
+    }
+
+    public enum ComputeType: Sendable {
+        case fargate
+        case ec2(EC2Configuration)
+    }
+
+    public struct EC2Configuration: Sendable {
+        public let instanceType: String
+        public let ami: AMI
+        public let sshKeyName: String?
+        public let enableSSH: Bool
+        public let minSize: Int?
+        public let maxSize: Int?
+
+        public init(
+            instanceType: String = "t3.micro",
+            ami: AMI = .ecsOptimized,
+            sshKeyName: String? = nil,
+            enableSSH: Bool = false,
+            minSize: Int? = nil,
+            maxSize: Int? = nil
+        ) {
+            self.instanceType = instanceType
+            self.ami = ami
+            self.sshKeyName = sshKeyName
+            self.enableSSH = enableSSH
+            self.minSize = minSize
+            self.maxSize = maxSize
+        }
+    }
+
+    public enum AMI: Sendable {
+        case ecsOptimized
+        case custom(String)
+
+        internal func resolveImageId(architecture: Architecture, context: Context = .current) -> Output<String> {
+            switch self {
+            case .ecsOptimized:
+                let paramPath = architecture == .arm64
+                    ? "/aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/image_id"
+                    : "/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id"
+
+                let param = Resource(
+                    name: "ecs-ami-\(architecture.dockerPlatform)",
+                    type: "aws:ssm:getParameter",
+                    properties: [
+                        "name": paramPath
+                    ],
+                    options: nil,
+                    context: context
+                )
+                return param.output.keyPath("value")
+            case .custom(let amiId):
+                return "\(amiId)"
+            }
+        }
+    }
+
+    private static func generateECSUserData(clusterName: String) -> Output<String> {
+        let script = """
+#!/bin/bash
+echo ECS_CLUSTER=\(clusterName) >> /etc/ecs/ecs.config
+echo ECS_ENABLE_CONTAINER_METADATA=true >> /etc/ecs/ecs.config
+"""
+        return "\(Data(script.utf8).base64EncodedString())"
     }
 }
