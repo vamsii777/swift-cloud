@@ -95,7 +95,7 @@ extension AWS {
                     properties: [
                         "apiId": api.id,
                         "authorizerType": "JWT",
-                        "name": "\(name)-authorizer",
+                        "name": tokenize(context.stage, name, "authorizer"),
                         "identitySources": ["$request.header.Authorization"],
                         "jwtConfiguration": [
                             "issuer": cognito.issuerUrl,

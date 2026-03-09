@@ -35,10 +35,11 @@ extension AWS {
             options: Resource.Options? = nil,
             context: Context = .current
         ) {
+            let fullName = tokenize(context.stage, name)
             let pool = Resource(
                 name: name,
                 type: "aws:cognito:UserPool",
-                properties: ["name": name],
+                properties: ["name": fullName],
                 options: options,
                 context: context
             )
@@ -70,7 +71,7 @@ extension AWS {
                 type: "aws:cognito:UserPoolClient",
                 properties: [
                     "userPoolId": pool.id,
-                    "name": "\(name)-client",
+                    "name": tokenize(context.stage, name, "client"),
                     "generateSecret": false,
                     "explicitAuthFlows": ["ALLOW_USER_SRP_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"],
                     "allowedOauthFlowsUserPoolClient": callbackUrls.isEmpty ? false : true,
