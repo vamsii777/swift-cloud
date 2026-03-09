@@ -5,6 +5,7 @@ extension AWS {
         public let api: Resource
         public let logGroup: Resource
         public let stage: Resource
+        public let authorizer: Authorizer?
         public let secureDomainName: AWS.SecureDomainName?
         public let apiDomainName: Resource?
         public let apiMapping: Resource?
@@ -34,6 +35,7 @@ extension AWS {
 
         public init(
             _ name: String,
+            _ cognito: AWS.Cognito? = nil,
             domainName: DomainName? = nil,
             cors: Bool = true,
             logFormat: LogFormat = .default,
@@ -86,6 +88,27 @@ extension AWS {
                 context: context
             )
 
+            if let cognito {
+                authorizer = Authorizer(resource: Resource(
+                    name: "\(name)-authorizer",
+                    type: "aws:apigatewayv2:Authorizer",
+                    properties: [
+                        "apiId": api.id,
+                        "authorizerType": "JWT",
+                        "name": "\(name)-authorizer",
+                        "identitySources": ["$request.header.Authorization"],
+                        "jwtConfiguration": [
+                            "issuer": cognito.issuerUrl,
+                            "audiences": [cognito.clientId],
+                        ],
+                    ],
+                    options: options,
+                    context: context
+                ))
+            } else {
+                authorizer = nil
+            }
+
             secureDomainName = domainName.map {
                 AWS.SecureDomainName(domainName: $0, options: options, context: context)
             }
@@ -131,7 +154,7 @@ extension AWS {
         }
 
         @discardableResult
-        public func route(_ routeKey: String, function: AWS.Function) -> Self {
+        public func route(_ routeKey: String, function: AWS.Function, auth: Bool = false) -> Self {
             let integration = Resource(
                 name: tokenize(api.chosenName, routeKey, "integration"),
                 type: "aws:apigatewayv2:Integration",
@@ -153,6 +176,8 @@ extension AWS {
                     "apiId": api.id,
                     "routeKey": routeKey,
                     "target": "integrations/\(integration.id)",
+                    "authorizationType": auth && authorizer != nil ? "JWT" : "NONE",
+                    "authorizerId": auth ? authorizer?.resource.id : nil,
                 ],
                 options: api.options,
                 context: api.context
@@ -166,6 +191,13 @@ extension AWS {
 
             return self
         }
+    }
+}
+
+extension AWS.APIGateway {
+    /// A JWT authorizer backed by a Cognito User Pool, attached to this API Gateway.
+    public struct Authorizer: Sendable {
+        public let resource: Resource
     }
 }
 
