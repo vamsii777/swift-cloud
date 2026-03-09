@@ -154,7 +154,11 @@ extension AWS {
         }
 
         @discardableResult
-        public func route(_ routeKey: String, function: AWS.Function, auth: Bool = false) -> Self {
+        public func route(
+            _ routeKey: String,
+            function: AWS.Function,
+            authorization: Authorization? = nil
+        ) -> Self {
             let integration = Resource(
                 name: tokenize(api.chosenName, routeKey, "integration"),
                 type: "aws:apigatewayv2:Integration",
@@ -169,6 +173,11 @@ extension AWS {
                 context: api.context
             )
 
+            let scopes: [String]? = {
+                guard case .scoped(let s) = authorization, !s.isEmpty else { return nil }
+                return s
+            }()
+
             _ = Resource(
                 name: tokenize(api.chosenName, routeKey, "route"),
                 type: "aws:apigatewayv2:Route",
@@ -176,8 +185,9 @@ extension AWS {
                     "apiId": api.id,
                     "routeKey": routeKey,
                     "target": "integrations/\(integration.id)",
-                    "authorizationType": auth && authorizer != nil ? "JWT" : "NONE",
-                    "authorizerId": auth ? authorizer?.resource.id : nil,
+                    "authorizationType": authorization != nil && authorizer != nil ? "JWT" : "NONE",
+                    "authorizerId": authorization != nil ? authorizer?.resource.id : nil,
+                    "authorizationScopes": scopes,
                 ],
                 options: api.options,
                 context: api.context
@@ -198,6 +208,22 @@ extension AWS.APIGateway {
     /// A JWT authorizer backed by a Cognito User Pool, attached to this API Gateway.
     public struct Authorizer: Sendable {
         public let resource: Resource
+    }
+}
+
+extension AWS.APIGateway {
+    public enum Authorization: Sendable {
+        /// Require a valid JWT — no scope restriction.
+        case `guard`
+        /// Require a valid JWT containing all listed scopes.
+        case scoped([String])
+
+        var scopes: [String] {
+            switch self {
+            case .guard: return []
+            case .scoped(let s): return s
+            }
+        }
     }
 }
 
