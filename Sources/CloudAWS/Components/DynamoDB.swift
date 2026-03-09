@@ -34,14 +34,16 @@ extension AWS {
                 type: "aws:dynamodb:Table",
                 properties: [
                     "billingMode": "PAY_PER_REQUEST",
-                    "hashKey": primaryIndex.partitionKey.name,
-                    "rangeKey": primaryIndex.sortKey?.name,
+                    "keySchema": [
+                        ["attributeName": primaryIndex.partitionKey.name, "keyType": "HASH"],
+                        primaryIndex.sortKey.map { ["attributeName": $0.name, "keyType": "RANGE"] },
+                    ].compactMap { $0 },
                     "attributes": ([primaryIndex] + secondaryIndexes).asAttributes,
                     "globalSecondaryIndexes": secondaryIndexes.map { index in
                         [
                             "name": index.partitionKey.name,
                             "projectionType": "ALL",
-                            "keySchemas": index.asKeySchema,
+                            "keySchema": index.asKeySchema,
                         ]
                     },
                     "streamEnabled": streaming.isEnabled,
