@@ -5,6 +5,7 @@ extension AWS {
         public let userPool: Resource
         public let userPoolClient: Resource
         public let userPoolDomain: Resource?
+        public let identityProviders: [Resource]
         public let identityPool: Resource?
         public let authenticatedRole: Resource?
         public let unauthenticatedRole: Resource?
@@ -28,23 +29,47 @@ extension AWS {
             callbackUrls: [any Input<String>] = [],
             logoutUrls: [any Input<String>] = [],
             domain: String? = nil,
+            providers: [IdentityProvider] = [],
+            attributeMappings: [String: [String: String]] = [:],
             identityPool: Bool = false,
             options: Resource.Options? = nil,
             context: Context = .current
         ) {
-            userPool = Resource(
+            let pool = Resource(
                 name: name,
                 type: "aws:cognito:UserPool",
                 properties: ["name": name],
                 options: options,
                 context: context
             )
+            userPool = pool
+
+            let providerResources: [Resource] = providers.map { provider in
+                let mapping: [String: AnyEncodable] = attributeMappings[provider.providerName].map {
+                    $0.mapValues { AnyEncodable($0) }
+                } ?? provider.defaultAttributeMapping
+
+                return Resource(
+                    name: "\(name)-idp-\(provider.providerName.lowercased())",
+                    type: "aws:cognito:UserPoolIdentityProvider",
+                    properties: [
+                        "userPoolId": pool.id,
+                        "providerName": provider.providerName,
+                        "providerType": provider.providerType,
+                        "providerDetails": provider.providerDetails,
+                        "attributeMapping": AnyEncodable(mapping),
+                    ],
+                    options: options,
+                    context: context
+                )
+            }
+            self.identityProviders = providerResources
 
             userPoolClient = Resource(
                 name: "\(name)-client",
                 type: "aws:cognito:UserPoolClient",
                 properties: [
-                    "userPoolId": userPool.id,
+                    "userPoolId": pool.id,
                     "name": "\(name)-client",
                     "generateSecret": false,
                     "explicitAuthFlows": ["ALLOW_USER_SRP_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"],
@@ -53,10 +78,11 @@ extension AWS {
                     "allowedOAuthScopes": ["email", "openid", "profile"],
                     "callbackUrls": callbackUrls.isEmpty ? nil : callbackUrls,
                     "logoutUrls": logoutUrls.isEmpty ? nil : logoutUrls,
-                    "supportedIdentityProviders": ["COGNITO"],
+                    "supportedIdentityProviders": ["COGNITO"] + providers.map { $0.providerName },
                 ],
                 options: options,
-                context: context
+                context: context,
+                dependsOn: providerResources.isEmpty ? nil : providerResources
             )
 
             if let domainValue = domain {
@@ -177,5 +203,98 @@ extension AWS.Cognito: Linkable {
                 "issuerUrl": issuerUrl,
             ]
         )
+    }
+}
+
+extension AWS.Cognito {
+    public enum IdentityProvider: Sendable {
+        case google(clientId: any Input<String>, clientSecret: any Input<String>, scopes: [String] = ["email", "openid", "profile"])
+        case facebook(appId: any Input<String>, appSecret: any Input<String>, scopes: [String] = ["email", "public_profile"])
+        case apple(clientId: any Input<String>, teamId: any Input<String>, keyId: any Input<String>, privateKey: any Input<String>, scopes: [String] = ["email", "name"])
+        case saml(name: String, metadataURL: (any Input<String>)? = nil, metadataContent: (any Input<String>)? = nil)
+        case oidc(name: String, clientId: any Input<String>, clientSecret: any Input<String>, issuer: any Input<String>, scopes: [String] = ["email", "openid", "profile"], attributesRequestMethod: String = "GET")
+    }
+}
+
+extension AWS.Cognito.IdentityProvider {
+    var providerName: String {
+        switch self {
+        case .google: return "Google"
+        case .facebook: return "Facebook"
+        case .apple: return "SignInWithApple"
+        case .saml(let name, _, _): return name
+        case .oidc(let name, _, _, _, _, _): return name
+        }
+    }
+
+    var providerType: String {
+        switch self {
+        case .google: return "Google"
+        case .facebook: return "Facebook"
+        case .apple: return "SignInWithApple"
+        case .saml: return "SAML"
+        case .oidc: return "OIDC"
+        }
+    }
+
+    var providerDetails: AnyEncodable {
+        switch self {
+        case .google(let clientId, let clientSecret, let scopes):
+            return [
+                "client_id": AnyEncodable(clientId),
+                "client_secret": AnyEncodable(clientSecret),
+                "authorize_scopes": AnyEncodable(scopes.joined(separator: " ")),
+            ]
+        case .facebook(let appId, let appSecret, let scopes):
+            return [
+                "client_id": AnyEncodable(appId),
+                "client_secret": AnyEncodable(appSecret),
+                "authorize_scopes": AnyEncodable(scopes.joined(separator: ",")),
+            ]
+        case .apple(let clientId, let teamId, let keyId, let privateKey, let scopes):
+            return [
+                "client_id": AnyEncodable(clientId),
+                "team_id": AnyEncodable(teamId),
+                "key_id": AnyEncodable(keyId),
+                "private_key": AnyEncodable(privateKey),
+                "authorize_scopes": AnyEncodable(scopes.joined(separator: " ")),
+            ]
+        case .saml(_, let metadataURL, let metadataContent):
+            precondition(
+                (metadataURL == nil) != (metadataContent == nil),
+                "SAML identity provider requires exactly one of metadataURL or metadataContent"
+            )
+            if let url = metadataURL {
+                return ["MetadataURL": AnyEncodable(url)]
+            } else {
+                return ["MetadataFile": AnyEncodable(metadataContent!)]
+            }
+        case .oidc(_, let clientId, let clientSecret, let issuer, let scopes, let attributesRequestMethod):
+            return [
+                "client_id": AnyEncodable(clientId),
+                "client_secret": AnyEncodable(clientSecret),
+                "issuer": AnyEncodable(issuer),
+                "authorize_scopes": AnyEncodable(scopes.joined(separator: " ")),
+                "attributes_request_method": AnyEncodable(attributesRequestMethod),
+            ]
+        }
+    }
+
+    var defaultAttributeMapping: [String: AnyEncodable] {
+        switch self {
+        case .google:
+            return ["email": "email", "username": "sub"]
+        case .facebook:
+            return ["email": "email", "username": "id"]
+        case .apple:
+            return ["email": "email", "username": "sub"]
+        case .saml:
+            return [
+                "email": "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress",
+                "username": "nameID",
+            ]
+        case .oidc:
+            return ["email": "email", "username": "sub"]
+        }
     }
 }
