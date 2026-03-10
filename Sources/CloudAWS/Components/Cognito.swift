@@ -28,6 +28,7 @@ extension AWS {
             _ name: String,
             callbackUrls: [any Input<String>] = [],
             logoutUrls: [any Input<String>] = [],
+            oauthScopes: [String] = [],
             domain: String? = nil,
             signInIdentifiers: Set<SignInIdentifier> = [.username],
             providers: [IdentityProvider] = [],
@@ -72,6 +73,11 @@ extension AWS {
             }
             self.identityProviders = providerResources
 
+            let oauthEnabled = !callbackUrls.isEmpty || !oauthScopes.isEmpty
+            // code flow requires callbackUrls; client_credentials is for M2M (no redirect needed)
+            let effectiveFlows: [String]? = oauthEnabled ? (!callbackUrls.isEmpty ? ["code"] : ["client_credentials"]) : nil
+            let effectiveScopes: [String]? = oauthEnabled ? (!oauthScopes.isEmpty ? oauthScopes : ["email", "openid", "profile"]) : nil
+
             userPoolClient = Resource(
                 name: "\(name)-client",
                 type: "aws:cognito:UserPoolClient",
@@ -80,9 +86,9 @@ extension AWS {
                     "name": tokenize(context.stage, name, "client"),
                     "generateSecret": false,
                     "explicitAuthFlows": ["ALLOW_USER_SRP_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"],
-                    "allowedOauthFlowsUserPoolClient": callbackUrls.isEmpty ? false : true,
-                    "allowedOauthFlows": callbackUrls.isEmpty ? nil : ["code"],
-                    "allowedOauthScopes": callbackUrls.isEmpty ? nil : ["email", "openid", "profile"],
+                    "allowedOauthFlowsUserPoolClient": oauthEnabled,
+                    "allowedOauthFlows": effectiveFlows,
+                    "allowedOauthScopes": effectiveScopes,
                     "callbackUrls": callbackUrls.isEmpty ? nil : callbackUrls,
                     "logoutUrls": logoutUrls.isEmpty ? nil : logoutUrls,
                     "supportedIdentityProviders": ["COGNITO"] + providers.map { $0.providerName },
