@@ -29,6 +29,7 @@ extension AWS {
             callbackUrls: [any Input<String>] = [],
             logoutUrls: [any Input<String>] = [],
             domain: String? = nil,
+            signInIdentifiers: Set<SignInIdentifier> = [.username],
             providers: [IdentityProvider] = [],
             attributeMappings: [String: [String: String]] = [:],
             identityPool: Bool = false,
@@ -36,10 +37,15 @@ extension AWS {
             context: Context = .current
         ) {
             let fullName = tokenize(context.stage, name)
+            let signInConfiguration = SignInConfiguration(identifiers: signInIdentifiers)
             let pool = Resource(
                 name: name,
                 type: "aws:cognito:UserPool",
-                properties: ["name": fullName],
+                properties: [
+                    "name": fullName,
+                    "aliasAttributes": signInConfiguration.aliasAttributes,
+                    "usernameAttributes": signInConfiguration.usernameAttributes,
+                ],
                 options: options,
                 context: context
             )
@@ -208,12 +214,41 @@ extension AWS.Cognito: Linkable {
 }
 
 extension AWS.Cognito {
+    public enum SignInIdentifier: String, Hashable, Sendable {
+        case username
+        case email
+        case phoneNumber
+    }
+
     public enum IdentityProvider: Sendable {
         case google(clientId: any Input<String>, clientSecret: any Input<String>, scopes: [String] = ["email", "openid", "profile"])
         case facebook(appId: any Input<String>, appSecret: any Input<String>, scopes: [String] = ["email", "public_profile"])
         case apple(clientId: any Input<String>, teamId: any Input<String>, keyId: any Input<String>, privateKey: any Input<String>, scopes: [String] = ["email", "name"])
         case saml(name: String, metadataURL: (any Input<String>)? = nil, metadataContent: (any Input<String>)? = nil)
         case oidc(name: String, clientId: any Input<String>, clientSecret: any Input<String>, issuer: any Input<String>, scopes: [String] = ["email", "openid", "profile"], attributesRequestMethod: String = "GET")
+    }
+}
+
+private struct SignInConfiguration {
+    let aliasAttributes: [String]?
+    let usernameAttributes: [String]?
+
+    init(identifiers: Set<AWS.Cognito.SignInIdentifier>) {
+        precondition(!identifiers.isEmpty, "Cognito signInIdentifiers cannot be empty.")
+
+        let includesUsername = identifiers.contains(.username)
+        let nonUsernameIdentifiers = identifiers.subtracting([.username])
+        let attributes = nonUsernameIdentifiers
+            .sorted { $0.rawValue < $1.rawValue }
+            .map(\.pulumiValue)
+
+        if includesUsername {
+            self.aliasAttributes = attributes.isEmpty ? nil : attributes
+            self.usernameAttributes = nil
+        } else {
+            self.aliasAttributes = nil
+            self.usernameAttributes = attributes
+        }
     }
 }
 
@@ -296,6 +331,19 @@ extension AWS.Cognito.IdentityProvider {
             ]
         case .oidc:
             return ["email": "email", "username": "sub"]
+        }
+    }
+}
+
+private extension AWS.Cognito.SignInIdentifier {
+    var pulumiValue: String {
+        switch self {
+        case .username:
+            return "username"
+        case .email:
+            return "email"
+        case .phoneNumber:
+            return "phone_number"
         }
     }
 }
