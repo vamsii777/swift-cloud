@@ -34,11 +34,26 @@ extension AWS {
             providers: [IdentityProvider] = [],
             attributeMappings: [String: [String: String]] = [:],
             identityPool: Bool = false,
+            triggers: [LambdaTrigger: AWS.Function] = [:],
             options: Resource.Options? = nil,
             context: Context = .current
         ) {
             let fullName = tokenize(context.stage, name)
             let signInConfiguration = SignInConfiguration(identifiers: signInIdentifiers)
+
+            let autoVerifiedAttributes: [String] = signInIdentifiers
+                .compactMap {
+                    switch $0 {
+                    case .email: return "email"
+                    case .phoneNumber: return "phone_number"
+                    case .username: return nil
+                    }
+                }
+                .sorted()
+
+            let lambdaConfig: [String: AnyEncodable]? = triggers.isEmpty ? nil :
+                Dictionary(uniqueKeysWithValues: triggers.map { ($0.rawValue, AnyEncodable($1.function.arn)) })
+
             let pool = Resource(
                 name: name,
                 type: "aws:cognito:UserPool",
@@ -46,11 +61,21 @@ extension AWS {
                     "name": fullName,
                     "aliasAttributes": signInConfiguration.aliasAttributes,
                     "usernameAttributes": signInConfiguration.usernameAttributes,
+                    "autoVerifiedAttributes": autoVerifiedAttributes.isEmpty ? nil : autoVerifiedAttributes,
+                    "lambdaConfig": lambdaConfig,
                 ],
                 options: options,
                 context: context
             )
             userPool = pool
+
+            for (trigger, function) in triggers {
+                function.grantInvokePermission(
+                    name: tokenize(name, trigger.rawValue),
+                    arn: pool.arn,
+                    principal: "cognito-idp.amazonaws.com"
+                )
+            }
 
             let providerResources: [Resource] = providers.map { provider in
                 let mapping: [String: AnyEncodable] = attributeMappings[provider.providerName].map {
@@ -224,6 +249,19 @@ extension AWS.Cognito {
         case username
         case email
         case phoneNumber
+    }
+
+    public enum LambdaTrigger: String, Hashable, Sendable {
+        case preSignUp
+        case postConfirmation
+        case customMessage
+        case preAuthentication
+        case postAuthentication
+        case defineAuthChallenge
+        case createAuthChallenge
+        case verifyAuthChallengeResponse
+        case preTokenGeneration
+        case userMigration
     }
 
     public enum IdentityProvider: Sendable {

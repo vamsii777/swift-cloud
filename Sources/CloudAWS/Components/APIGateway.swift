@@ -10,6 +10,66 @@ extension AWS {
         public let apiDomainName: Resource?
         public let apiMapping: Resource?
 
+        // MARK: - Nested types
+
+        /// A JWT authorizer backed by a Cognito User Pool, attached to this API Gateway.
+        public struct Authorizer: Sendable {
+            public let resource: Resource
+        }
+
+        public struct Authorization: Sendable {
+            let isRequired: Bool
+            public let scopes: [String]
+
+            /// No authorization — route is public.
+            public static let none = Authorization(isRequired: false, scopes: [])
+
+            /// Require a valid JWT — no scope restriction.
+            public static let jwt = Authorization(isRequired: true, scopes: [])
+
+            /// Require a valid JWT containing all listed scopes.
+            public static func jwt(scopes: [String]) -> Authorization {
+                Authorization(isRequired: true, scopes: scopes)
+            }
+        }
+
+        public struct Route: Sendable {
+            let key: String
+            let authorization: Authorization
+
+            public init(_ key: String, authorization: Authorization = .none) {
+                self.key = key
+                self.authorization = authorization
+            }
+        }
+
+        @resultBuilder
+        public struct RouteBuilder {
+            public static func buildBlock(_ routes: Route...) -> [Route] {
+                Array(routes)
+            }
+        }
+
+        public struct LogFormat: ExpressibleByStringLiteral, Sendable {
+            public let value: String
+
+            public init(stringLiteral value: String) {
+                self.value = value
+            }
+
+            /// JSON format capturing common request/response fields.
+            public static let `default` = LogFormat(
+                stringLiteral: #"{"requestId":"$context.requestId","ip":"$context.identity.sourceIp","requestTime":"$context.requestTime","httpMethod":"$context.httpMethod","routeKey":"$context.routeKey","status":"$context.status","protocol":"$context.protocol","responseLength":"$context.responseLength","integrationError":"$context.integrationErrorMessage"}"#
+            )
+
+            /// Common Log Format (CLF).
+            public static let clf = LogFormat(
+                stringLiteral: "$context.identity.sourceIp - - [$context.requestTime] \"$context.httpMethod $context.routeKey $context.protocol\" $context.status $context.responseLength"
+            )
+        }
+
+        // MARK: - Computed properties
+
         public var name: Output<String> {
             api.name
         }
@@ -32,6 +92,8 @@ extension AWS {
         public var url: Output<String> {
             "https://\(hostname)"
         }
+
+        // MARK: - Init
 
         public init(
             _ name: String,
@@ -153,11 +215,13 @@ extension AWS {
             }
         }
 
+        // MARK: - Routing
+
         @discardableResult
         public func route(
             _ routeKey: String,
             function: AWS.Function,
-            authorization: Authorization? = nil
+            authorization: Authorization = .none
         ) -> Self {
             let integration = Resource(
                 name: tokenize(api.chosenName, routeKey, "integration"),
@@ -173,10 +237,7 @@ extension AWS {
                 context: api.context
             )
 
-            let scopes: [String]? = {
-                guard case .scoped(let s) = authorization, !s.isEmpty else { return nil }
-                return s
-            }()
+            let scopes: [String]? = authorization.scopes.isEmpty ? nil : authorization.scopes
 
             _ = Resource(
                 name: tokenize(api.chosenName, routeKey, "route"),
@@ -185,8 +246,8 @@ extension AWS {
                     "apiId": api.id,
                     "routeKey": routeKey,
                     "target": "integrations/\(integration.id)",
-                    "authorizationType": authorization != nil && authorizer != nil ? "JWT" : "NONE",
-                    "authorizerId": authorization != nil ? authorizer?.resource.id : nil,
+                    "authorizationType": authorization.isRequired && authorizer != nil ? "JWT" : "NONE",
+                    "authorizerId": authorization.isRequired ? authorizer?.resource.id : nil,
                     "authorizationScopes": scopes,
                 ],
                 options: api.options,
@@ -201,48 +262,23 @@ extension AWS {
 
             return self
         }
-    }
-}
 
-extension AWS.APIGateway {
-    /// A JWT authorizer backed by a Cognito User Pool, attached to this API Gateway.
-    public struct Authorizer: Sendable {
-        public let resource: Resource
-    }
-}
-
-extension AWS.APIGateway {
-    public enum Authorization: Sendable {
-        /// Require a valid JWT — no scope restriction.
-        case `guard`
-        /// Require a valid JWT containing all listed scopes.
-        case scoped([String])
-
-        var scopes: [String] {
-            switch self {
-            case .guard: return []
-            case .scoped(let s): return s
+        @discardableResult
+        public func routes(
+            _ function: AWS.Function,
+            @RouteBuilder _ build: () -> [Route]
+        ) -> Self {
+            for route in build() {
+                self.route(route.key, function: function, authorization: route.authorization)
             }
+            return self
         }
     }
 }
 
-extension AWS.APIGateway {
-    public struct LogFormat: ExpressibleByStringLiteral, Sendable {
-        public let value: String
-
-        public init(stringLiteral value: String) {
-            self.value = value
-        }
-
-        /// JSON format capturing common request/response fields.
-        public static let `default` = LogFormat(
-            stringLiteral: #"{"requestId":"$context.requestId","ip":"$context.identity.sourceIp","requestTime":"$context.requestTime","httpMethod":"$context.httpMethod","routeKey":"$context.routeKey","status":"$context.status","protocol":"$context.protocol","responseLength":"$context.responseLength","integrationError":"$context.integrationErrorMessage"}"#
-        )
-
-        /// Common Log Format (CLF).
-        public static let clf = LogFormat(
-            stringLiteral: "$context.identity.sourceIp - - [$context.requestTime] \"$context.httpMethod $context.routeKey $context.protocol\" $context.status $context.responseLength"
-        )
-    }
+// Expose nested types at the AWS namespace so call sites can write
+// `AWS.Route(...)` and `AWS.Authorization.jwt` without the full path.
+extension AWS {
+    public typealias Route = APIGateway.Route
+    public typealias Authorization = APIGateway.Authorization
 }

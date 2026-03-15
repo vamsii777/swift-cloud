@@ -8,6 +8,10 @@ xcuserdata/
 DerivedData/
 .swiftpm/xcode
 .netrc
+.idea
 
 # swift cloud
 .cloud/
+
+# local git worktrees (do not commit)
+.worktrees/
