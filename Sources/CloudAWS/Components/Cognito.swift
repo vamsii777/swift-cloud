@@ -1,5 +1,18 @@
 import CloudCore
 
+fileprivate let cognitoActions: [String] = [
+    "cognito-idp:AdminInitiateAuth",
+    "cognito-idp:AdminCreateUser",
+    "cognito-idp:AdminDeleteUser",
+    "cognito-idp:AdminGetUser",
+    "cognito-idp:AdminUpdateUserAttributes",
+    "cognito-idp:AdminListGroupsForUser",
+    "cognito-idp:AdminAddUserToGroup",
+    "cognito-idp:AdminRemoveUserFromGroup",
+    "cognito-idp:ListUsers",
+    "cognito-idp:ListGroups",
+]
+
 extension AWS {
     public struct Cognito: AWSComponent {
         public let userPool: Resource
@@ -70,10 +83,32 @@ extension AWS {
             userPool = pool
 
             for (trigger, function) in triggers {
+                // Cognito → Lambda: allow Cognito to invoke the trigger function
                 function.grantInvokePermission(
                     name: tokenize(name, trigger.rawValue),
                     arn: pool.arn,
                     principal: "cognito-idp.amazonaws.com"
+                )
+                // Lambda → Cognito: grant the trigger function IAM access to call back into
+                // the user pool. Done directly (not via link()) to avoid a Pulumi circular
+                // dependency: Cognito UserPool stores Lambda ARN in lambdaConfig, and link()
+                // would also store Cognito Output<String> values in Lambda's env vars → cycle.
+                _ = Resource(
+                    name: tokenize(name, trigger.rawValue, "trigger-policy"),
+                    type: "aws:iam:RolePolicy",
+                    properties: [
+                        "role": function.role.id,
+                        "policy": Resource.JSON([
+                            "Version": "2012-10-17",
+                            "Statement": [[
+                                "Effect": "Allow",
+                                "Action": cognitoActions,
+                                "Resource": pool.arn,
+                            ]],
+                        ]),
+                    ],
+                    options: function.role.resource.options,
+                    context: function.role.resource.context
                 )
             }
 
@@ -214,20 +249,7 @@ extension AWS {
 }
 
 extension AWS.Cognito: Linkable {
-    public var actions: [String] {
-        [
-            "cognito-idp:AdminInitiateAuth",
-            "cognito-idp:AdminCreateUser",
-            "cognito-idp:AdminDeleteUser",
-            "cognito-idp:AdminGetUser",
-            "cognito-idp:AdminUpdateUserAttributes",
-            "cognito-idp:AdminListGroupsForUser",
-            "cognito-idp:AdminAddUserToGroup",
-            "cognito-idp:AdminRemoveUserFromGroup",
-            "cognito-idp:ListUsers",
-            "cognito-idp:ListGroups",
-        ]
-    }
+    public var actions: [String] { cognitoActions }
 
     public var resources: [Output<String>] { [userPool.arn] }
 
