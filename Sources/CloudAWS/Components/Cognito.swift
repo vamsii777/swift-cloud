@@ -44,6 +44,7 @@ extension AWS {
             oauthScopes: [String] = [],
             domain: String? = nil,
             signInIdentifiers: Set<SignInIdentifier> = [.username],
+            autoVerify: Set<SignInIdentifier>? = nil,
             providers: [IdentityProvider] = [],
             attributeMappings: [String: [String: String]] = [:],
             identityPool: Bool = false,
@@ -54,7 +55,11 @@ extension AWS {
             let fullName = tokenize(context.stage, name)
             let signInConfiguration = SignInConfiguration(identifiers: signInIdentifiers)
 
-            let autoVerifiedAttributes: [String] = signInIdentifiers
+            // Default: auto-verify email only. phone_number is intentionally excluded from the
+            // default because it requires SNS SMS configuration in the AWS account. Pass
+            // autoVerify: [.phoneNumber] (or include .email too) to opt into SMS verification.
+            let verifySet = autoVerify ?? signInIdentifiers.intersection([.email])
+            let autoVerifiedAttributes: [String] = verifySet
                 .compactMap {
                     switch $0 {
                     case .email: return "email"
