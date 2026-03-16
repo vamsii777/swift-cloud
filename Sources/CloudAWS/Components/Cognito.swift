@@ -49,11 +49,21 @@ extension AWS {
             attributeMappings: [String: [String: String]] = [:],
             identityPool: Bool = false,
             triggers: [LambdaTrigger: AWS.Function] = [:],
+            signInPolicy: SignInPolicy? = nil,
+            webAuthn: WebAuthnConfiguration? = nil,
             options: Resource.Options? = nil,
             context: Context = .current
         ) {
             let fullName = tokenize(context.stage, name)
             let signInConfiguration = SignInConfiguration(identifiers: signInIdentifiers)
+
+            if webAuthn != nil {
+                precondition(signInPolicy != nil, "Cognito: webAuthn requires signInPolicy to be set.")
+                precondition(
+                    signInPolicy!.allowedFirstAuthFactors.contains(.passkey),
+                    "Cognito: webAuthn is configured but .passkey is not in signInPolicy.allowedFirstAuthFactors."
+                )
+            }
 
             // Default: auto-verify email only. phone_number is intentionally excluded from the
             // default because it requires SNS SMS configuration in the AWS account. Pass
@@ -72,6 +82,11 @@ extension AWS {
             let lambdaConfig: [String: AnyEncodable]? = triggers.isEmpty ? nil :
                 Dictionary(uniqueKeysWithValues: triggers.map { ($0.rawValue, AnyEncodable($1.function.arn)) })
 
+            let signInPolicyProperty: AnyEncodable? = signInPolicy.map { policy in
+                let sortedFactors = policy.allowedFirstAuthFactors.map(\.rawValue).sorted()
+                return AnyEncodable(["allowedFirstAuthFactors": AnyEncodable(sortedFactors)])
+            }
+
             let pool = Resource(
                 name: name,
                 type: "aws:cognito:UserPool",
@@ -81,6 +96,9 @@ extension AWS {
                     "usernameAttributes": signInConfiguration.usernameAttributes,
                     "autoVerifiedAttributes": autoVerifiedAttributes.isEmpty ? nil : autoVerifiedAttributes,
                     "lambdaConfig": lambdaConfig,
+                    "signInPolicy": signInPolicyProperty,
+                    "webAuthnRelyingPartyId": webAuthn?.relyingPartyId,
+                    "webAuthnUserVerification": webAuthn?.userVerification.rawValue,
                 ],
                 options: options,
                 context: context
@@ -143,6 +161,12 @@ extension AWS {
             let effectiveFlows: [String]? = oauthEnabled ? (!callbackUrls.isEmpty ? ["code"] : ["client_credentials"]) : nil
             let effectiveScopes: [String]? = oauthEnabled ? (!oauthScopes.isEmpty ? oauthScopes : ["email", "openid", "profile"]) : nil
 
+            let explicitAuthFlows: [String] = {
+                var flows = ["ALLOW_USER_SRP_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
+                if signInPolicy != nil { flows.insert("ALLOW_USER_AUTH", at: 0) }
+                return flows
+            }()
+
             userPoolClient = Resource(
                 name: "\(name)-client",
                 type: "aws:cognito:UserPoolClient",
@@ -150,7 +174,7 @@ extension AWS {
                     "userPoolId": pool.id,
                     "name": tokenize(context.stage, name, "client"),
                     "generateSecret": false,
-                    "explicitAuthFlows": ["ALLOW_USER_SRP_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"],
+                    "explicitAuthFlows": explicitAuthFlows,
                     "allowedOauthFlowsUserPoolClient": oauthEnabled,
                     "allowedOauthFlows": effectiveFlows,
                     "allowedOauthScopes": effectiveScopes,
@@ -297,6 +321,41 @@ extension AWS.Cognito {
         case apple(clientId: any Input<String>, teamId: any Input<String>, keyId: any Input<String>, privateKey: any Input<String>, scopes: [String] = ["email", "name"])
         case saml(name: String, metadataURL: (any Input<String>)? = nil, metadataContent: (any Input<String>)? = nil)
         case oidc(name: String, clientId: any Input<String>, clientSecret: any Input<String>, issuer: any Input<String>, scopes: [String] = ["email", "openid", "profile"], attributesRequestMethod: String = "GET")
+    }
+
+    public enum FirstAuthFactor: String, Hashable, Sendable {
+        case password = "PASSWORD"
+        case passkey  = "WEB_AUTHN"
+        case emailOtp = "EMAIL_OTP"
+        case smsOtp   = "SMS_OTP"
+    }
+
+    public struct SignInPolicy: Sendable {
+        public let allowedFirstAuthFactors: Set<FirstAuthFactor>
+
+        public init(allowing factors: Set<FirstAuthFactor>) {
+            precondition(!factors.isEmpty, "Cognito SignInPolicy must include at least one factor.")
+            precondition(
+                factors != [.passkey],
+                "Cognito SignInPolicy: WEB_AUTHN cannot be the sole factor; include at least one other."
+            )
+            self.allowedFirstAuthFactors = factors
+        }
+    }
+
+    public struct WebAuthnConfiguration: Sendable {
+        public enum UserVerification: String, Sendable {
+            case preferred = "preferred"
+            case required  = "required"
+        }
+
+        public let relyingPartyId: String
+        public let userVerification: UserVerification
+
+        public init(relyingPartyId: String, userVerification: UserVerification = .preferred) {
+            self.relyingPartyId = relyingPartyId
+            self.userVerification = userVerification
+        }
     }
 }
 
