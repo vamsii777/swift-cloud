@@ -97,8 +97,12 @@ extension AWS {
                     "autoVerifiedAttributes": autoVerifiedAttributes.isEmpty ? nil : autoVerifiedAttributes,
                     "lambdaConfig": lambdaConfig,
                     "signInPolicy": signInPolicyProperty,
-                    "webAuthnRelyingPartyId": webAuthn?.relyingPartyId,
-                    "webAuthnUserVerification": webAuthn?.userVerification.rawValue,
+                    "webAuthnConfiguration": webAuthn.map {
+                        AnyEncodable([
+                            "relyingPartyId": AnyEncodable($0.relyingPartyId),
+                            "userVerification": AnyEncodable($0.userVerification.rawValue),
+                        ])
+                    },
                 ],
                 options: options,
                 context: context
