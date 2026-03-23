@@ -48,6 +48,7 @@ extension AWS {
             providers: [IdentityProvider] = [],
             attributeMappings: [String: [String: String]] = [:],
             identityPool: Bool = false,
+            allowUnauthenticatedIdentities: Bool = false,
             triggers: [LambdaTrigger: AWS.Function] = [:],
             signInPolicy: SignInPolicy? = nil,
             webAuthn: WebAuthnConfiguration? = nil,
@@ -56,6 +57,11 @@ extension AWS {
         ) {
             let fullName = tokenize(context.stage, name)
             let signInConfiguration = SignInConfiguration(identifiers: signInIdentifiers)
+
+            precondition(
+                !allowUnauthenticatedIdentities || identityPool,
+                "Cognito: allowUnauthenticatedIdentities requires identityPool to be enabled."
+            )
 
             if webAuthn != nil {
                 precondition(signInPolicy != nil, "Cognito: webAuthn requires signInPolicy to be set.")
@@ -212,7 +218,7 @@ extension AWS {
                     type: "aws:cognito:IdentityPool",
                     properties: [
                         "identityPoolName": "\(name)-identity-pool",
-                        "allowUnauthenticatedIdentities": false,
+                        "allowUnauthenticatedIdentities": allowUnauthenticatedIdentities,
                         "cognitoIdentityProviders": [[
                             "clientId": userPoolClient.id,
                             "providerName": userPool.output.keyPath("endpoint"),
@@ -222,18 +228,27 @@ extension AWS {
                     options: options,
                     context: context
                 )
+                let trustPolicy: (String) -> AnyEncodable = { amr in
+                    Resource.JSON([
+                        "Version": "2012-10-17",
+                        "Statement": [[
+                            "Effect": "Allow",
+                            "Principal": ["Federated": "cognito-identity.amazonaws.com"],
+                            "Action": "sts:AssumeRoleWithWebIdentity",
+                            "Condition": [
+                                "StringEquals": [
+                                    "cognito-identity.amazonaws.com:aud": idPool.id,
+                                    "cognito-identity.amazonaws.com:amr": amr,
+                                ],
+                            ],
+                        ]],
+                    ])
+                }
                 let authRole = Resource(
                     name: "\(name)-auth-role",
                     type: "aws:iam:Role",
                     properties: [
-                        "assumeRolePolicy": Resource.JSON([
-                            "Version": "2012-10-17",
-                            "Statement": [[
-                                "Effect": "Allow",
-                                "Principal": ["Federated": "cognito-identity.amazonaws.com"],
-                                "Action": "sts:AssumeRoleWithWebIdentity",
-                            ]],
-                        ])
+                        "assumeRolePolicy": trustPolicy("authenticated")
                     ],
                     options: options,
                     context: context
@@ -242,14 +257,7 @@ extension AWS {
                     name: "\(name)-unauth-role",
                     type: "aws:iam:Role",
                     properties: [
-                        "assumeRolePolicy": Resource.JSON([
-                            "Version": "2012-10-17",
-                            "Statement": [[
-                                "Effect": "Allow",
-                                "Principal": ["Federated": "cognito-identity.amazonaws.com"],
-                                "Action": "sts:AssumeRoleWithWebIdentity",
-                            ]],
-                        ])
+                        "assumeRolePolicy": trustPolicy("unauthenticated")
                     ],
                     options: options,
                     context: context
