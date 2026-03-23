@@ -158,7 +158,7 @@ extension UI {
                 line
                 .split(separator: .newlineSequence)
                 .map { sanitizeLine($0.description) }
-                .map { $0.prefix(cli.size.width - 10) }
+                .map { Self.spinnerLine($0.description, terminalWidth: cli.size.width) }
                 .filter { !$0.isEmpty }
 
             guard !lines.isEmpty else {
@@ -221,6 +221,14 @@ extension UI {
             }
             let regex = try! Regex("[^0-9A-Za-z+-_.,:;!? ]")
             return input.replacing(regex, with: "").trimmingCharacters(in: .whitespaces)
+        }
+
+        static func spinnerLineLimit(terminalWidth: Int) -> Int {
+            max(0, terminalWidth - 10)
+        }
+
+        static func spinnerLine(_ line: String, terminalWidth: Int) -> Substring {
+            line.prefix(Self.spinnerLineLimit(terminalWidth: terminalWidth))
         }
     }
 
