@@ -161,25 +161,6 @@ extension Builder {
 }
 
 extension Builder {
-    private enum ContainerRuntime: String {
-        case docker = "docker"
-        case appleContainer = "container"
-    }
-
-    private func resolveContainerRuntime() async -> ContainerRuntime {
-        if let override = ProcessInfo.processInfo.environment["SWIFT_CLOUD_CONTAINER_RUNTIME"],
-           let runtime = ContainerRuntime(rawValue: override)
-        {
-            return runtime
-        }
-        if (try? await shellOut(to: .name("which"), arguments: ["container"])) != nil {
-            return .appleContainer
-        }
-        return .docker
-    }
-}
-
-extension Builder {
     private func buildNative(targetName: String, flags: [String]) async throws {
         let spinner = UI.spinner(label: #"Building target "\#(targetName)""#)
         defer { spinner.stop() }
@@ -208,9 +189,8 @@ extension Builder {
         let buildCommand = "swift build -c release --product \(targetName) \(flags.joined(separator: " "))"
         spinner.push(buildCommand)
 
-        let runtime = await resolveContainerRuntime()
         try await shellOut(
-            to: .name(runtime.rawValue),
+            to: .name("docker"),
             arguments: [
                 "run",
                 "--platform", "linux/\(architecture.dockerPlatform)",
